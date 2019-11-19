@@ -1,0 +1,4 @@
+python multigpu_train.py --gpu_list=[0,1,2,4] --input_size=512 --batch_size_per_gpu=8 --checkpoint_path=./tmp/east_icdar2015_mobilenet_v2_50_rbox/ --text_scale=512 --training_data_path=home/minjun/jupyter/data/ocr/2015/train --geometry=RBOX --learning_rate=0.0001 --num_readers=24 
+
+
+python multigpu_train.py --input_size=512 --batch_size_per_gpu=14 --checkpoint_path=./tmp/east_icdar2015_mobilenet_v2_50_rbox/ --text_scale=512 --training_data_path=home/minjun/jupyter/data/ocr/2015/train --geometry=RBOX --learning_rate=0.0001 --num_readers=24 

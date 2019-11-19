@@ -10,11 +10,15 @@ tf.app.flags.DEFINE_float('learning_rate', 0.0001, '')
 tf.app.flags.DEFINE_integer('max_steps', 100000, '')
 tf.app.flags.DEFINE_float('moving_average_decay', 0.997, '')
 tf.app.flags.DEFINE_string('gpu_list', '1', '')
-tf.app.flags.DEFINE_string('checkpoint_path', '/tmp/east_resnet_v1_50_rbox/', '')
+tf.app.flags.DEFINE_string('checkpoint_path', './tmp/east_mobilnet_v2_50_rbox/', '')
 tf.app.flags.DEFINE_boolean('restore', False, 'whether to resotre from checkpoint')
 tf.app.flags.DEFINE_integer('save_checkpoint_steps', 1000, '')
 tf.app.flags.DEFINE_integer('save_summary_steps', 100, '')
-tf.app.flags.DEFINE_string('pretrained_model_path', None, '')
+tf.app.flags.DEFINE_string('pretrained_model_path',None, '')
+tf.app.flags.DEFINE_string('backbone', 'Mobilenet', 'what kind of backbone')
+#tf.app.flags.DEFINE_string('backbone_ckpt', '/home/minjun/Jupyter/ocr/EAST/trained_mobilnetv2/mobilenet_v2_1.0_224.ckpt', 'bacbkone directory')
+
+
 
 import model
 import icdar
@@ -126,7 +130,7 @@ def main(argv=None):
     with tf.control_dependencies([variables_averages_op, apply_gradient_op, batch_norm_updates_op]):
         train_op = tf.no_op(name='train_op')
 
-    saver = tf.train.Saver(tf.global_variables())
+    saver = tf.train.Saver(tf.global_variables(),max_to_keep=1000)
     summary_writer = tf.summary.FileWriter(FLAGS.checkpoint_path, tf.get_default_graph())
 
     init = tf.global_variables_initializer()
@@ -134,22 +138,59 @@ def main(argv=None):
     if FLAGS.pretrained_model_path is not None:
         variable_restore_op = slim.assign_from_checkpoint_fn(FLAGS.pretrained_model_path, slim.get_trainable_variables(),
                                                              ignore_missing_vars=True)
+   
+        
+    
+    step = 0
     with tf.Session(config=tf.ConfigProto(allow_soft_placement=True)) as sess:
         if FLAGS.restore:
-            print('continue training from previous checkpoint')
-            ckpt = tf.train.latest_checkpoint(FLAGS.checkpoint_path)
-            saver.restore(sess, ckpt)
-        else:
-            sess.run(init)
-            if FLAGS.pretrained_model_path is not None:
-                variable_restore_op(sess)
+            ckpt_state = tf.train.get_checkpoint_state(FLAGS.checkpoint_path)
+            if ckpt_state is not None :
+                print('continue training from previous checkpoint')
+                model_path = os.path.join(FLAGS.checkpoint_path, os.path.basename(ckpt_state.model_checkpoint_path))
+                print('Restore from {}'.format(model_path))
+                saver.restore(sess, model_path)
+                print(sess.run(global_step))
+                step=int(ckpt.split('-')[-1])-1
 
+            #else : 
+            #    print('Load the backbone, Name {}'.format(FLAGS.backbone))
+            #    load_layers = tf.global_variables(scope=FLAGS.backbone)
+            #    print(load_layers)
+            #    saver = tf.train.Saver(load_layers)
+            #    saver.restore(sess,  FLAGS.backbone_ckpt)
+            #    step = 0
+            else:
+                sess.run(init)
+                #for layer in tf.global_variables(scope='Mobilenet')[:2]:
+                #    print("layer name : {} mean : {}".format(layer.name, sess.run(tf.reduce_mean(layer.eval(session=sess)))))
+                if FLAGS.pretrained_model_path is not None:
+                    print("--------------------------------")
+                    print("---Load the Pretraiend-Weight---")
+                    print("--------------------------------")
+
+                    variable_restore_op(sess)
+                #for layer in tf.global_variables(scope='Mobilenet')[:2]:
+                #    print("layer name : {} mean : {}".format(layer.name, sess.run(tf.reduce_mean(layer.eval(session=sess)))))
+        else :                 
+            sess.run(init)
+
+        total_parameters=0
+        for variable in tf.trainable_variables():  
+            local_parameters=1
+            shape = variable.get_shape()  #getting shape of a variable
+            for i in shape:
+                local_parameters*=i.value  #mutiplying dimension values
+            total_parameters+=local_parameters
+        print("-----params-----" , total_parameters)
         data_generator = icdar.get_batch(num_workers=FLAGS.num_readers,
                                          input_size=FLAGS.input_size,
                                          batch_size=FLAGS.batch_size_per_gpu * len(gpus))
+        
 
         start = time.time()
-        for step in range(FLAGS.max_steps):
+        
+        while step <FLAGS.max_steps:
             data = next(data_generator)
             ml, tl, _ = sess.run([model_loss, total_loss, train_op], feed_dict={input_images: data[0],
                                                                                 input_score_maps: data[2],
@@ -175,6 +216,7 @@ def main(argv=None):
                                                                                              input_geo_maps: data[3],
                                                                                              input_training_masks: data[4]})
                 summary_writer.add_summary(summary_str, global_step=step)
+            step+=1
 
 if __name__ == '__main__':
     tf.app.run()

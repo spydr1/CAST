@@ -14,7 +14,7 @@ import tensorflow as tf
 
 from data_util import GeneratorEnqueuer
 
-tf.app.flags.DEFINE_string('training_data_path', '/data/ocr/icdar2015/',
+tf.app.flags.DEFINE_string('training_data_path', '/data/ocr/2015/train',
                            'training dataset to use')
 tf.app.flags.DEFINE_integer('max_image_large_side', 1280,
                             'max image size of training')
@@ -32,6 +32,15 @@ tf.app.flags.DEFINE_string('geometry', 'RBOX',
 
 FLAGS = tf.app.flags.FLAGS
 
+class A (object):
+    training_data_path = '/home/minjun/Jupyter/data/ocr/2015/train'
+    max_image_large_side = 1280
+    max_text_size = 800
+    min_text_size = 10
+    min_crop_side_ratio = 0.1
+    geometry = 'RBOX'
+    
+FLAGS = A()
 
 def get_images():
     files = []
@@ -601,7 +610,7 @@ def generator(input_size=512, batch_size=32,
                 im = cv2.imread(im_fn)
                 # print im_fn
                 h, w, _ = im.shape
-                txt_fn = im_fn.replace(os.path.basename(im_fn).split('.')[1], 'txt')
+                txt_fn = '{}_gt/gt_{}.txt'.format(os.path.dirname(im_fn),os.path.basename(im_fn).split('.')[0])
                 if not os.path.exists(txt_fn):
                     print('text file {} does not exists'.format(txt_fn))
                     continue

@@ -1,11 +1,31 @@
 import tensorflow as tf
 import numpy as np
+from research.slim.nets.mobilenet import mobilenet_v2
+
 
 from tensorflow.contrib import slim
+from nets import resnet_v1
+
+
+## expanded
+import research.slim.nets.mobilenet.conv_blocks as ops
+from research.slim.nets.mobilenet import mobilenet as lib
+expand_input = ops.expand_input_by_factor
+##
+
+
+import sys
+
+#pvanet
+sys.path.append('/home/minjun/Jupyter/ocr/tf-pvanet/')
+sys.path.append('/home/minjun/Jupyter/ocr/pylib/src/')
+from pvanet import pvanet, pvanet_scope
+import util
+##
+
 
 tf.app.flags.DEFINE_integer('text_scale', 512, '')
-
-from nets import resnet_v1
+tf.app.flags.DEFINE_string('decoder', 'CRAFT', 'decoder type : original, CRAFT')
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -30,55 +50,156 @@ def mean_image_subtraction(images, means=[123.68, 116.78, 103.94]):
     return tf.concat(axis=3, values=channels)
 
 
-def model(images, weight_decay=1e-5, is_training=True):
+def model(images, weight_decay=1e-3, is_training=True):
     '''
     define the model, we use slim's implemention of resnet
     '''
     images = mean_image_subtraction(images)
+    if FLAGS.backbone == 'Resnet':
+        with slim.arg_scope(resnet_v1.resnet_arg_scope(weight_decay=weight_decay)):
+            logits, end_points = resnet_v1.resnet_v1_50(images, is_training=is_training, scope='resnet_v1_50')
+    elif FLAGS.backbone == 'Mobilenet':
+        with slim.arg_scope(mobilenet_v2.training_scope(weight_decay=weight_decay)):
+            logits, endpoints = mobilenet_v2.mobilenet_base(images,is_training=is_training)
+        end_points = dict()
+        end_points['pool2'] = endpoints['layer_4/output']
+        end_points['pool3'] = endpoints['layer_6/output']
+        end_points['pool4'] = endpoints['layer_13/output']
+        end_points['pool5'] = endpoints['layer_19']
+    elif FLAGS.backbone == 'Pvanet' or 'Pvanet2x':
+        print("Backbone is Pvanet")
+        expansion = 1 if FLAGS.backbone == 'Pvanet' else 2
+        with slim.arg_scope(pvanet_scope(is_training,weight_decay=weight_decay)):
+            net, end_points = pvanet(images,expansion=expansion)
+            end_points['pool2'] = end_points['conv2']
+            end_points['pool3'] = end_points['conv3']
+            end_points['pool4'] = end_points['conv4']
+            end_points['pool5'] = end_points['conv5']
 
-    with slim.arg_scope(resnet_v1.resnet_arg_scope(weight_decay=weight_decay)):
-        logits, end_points = resnet_v1.resnet_v1_50(images, is_training=is_training, scope='resnet_v1_50')
+                    
+    if FLAGS.decoder == 'CRAFT':
+        print("deep decoder")
+        with tf.variable_scope('feature_fusion', values=[end_points.values]):
+            batch_norm_params = {
+            'decay': 0.997,
+            'epsilon': 1e-5,
+            'scale': True,
+            'is_training': is_training
+            }
+            with slim.arg_scope([slim.conv2d],
+                                activation_fn=tf.nn.relu,
+                                normalizer_fn=slim.batch_norm,
+                                normalizer_params=batch_norm_params,
+                                weights_regularizer=slim.l2_regularizer(weight_decay)):
+                x = unpool(end_points['pool5'])
+                x = tf.concat([x,end_points['pool4']],axis=-1)
+                x = slim.conv2d(x, 256, 1)
+                x = slim.conv2d(x, 128, 3)
+                print("up_4 shape : ",x.shape)
 
-    with tf.variable_scope('feature_fusion', values=[end_points.values]):
-        batch_norm_params = {
-        'decay': 0.997,
-        'epsilon': 1e-5,
-        'scale': True,
-        'is_training': is_training
+                x = unpool(x)
+                x = tf.concat([x,end_points['pool3']],axis=-1)
+                x = slim.conv2d(x, 128, 1)
+                x = slim.conv2d(x, 64, 3)
+                print("up_3 shape : ",x.shape)
+
+                x = unpool(x)
+                x = tf.concat([x,end_points['pool2']],axis=-1)
+                x = slim.conv2d(x, 64, 1)
+                x = slim.conv2d(x, 32, 3)
+                print("up_2 shape : ",x.shape)
+
+                x = slim.conv2d(x, 32, 3)
+                x = slim.conv2d(x, 32, 3)
+                x = slim.conv2d(x, 16, 3)
+                x = slim.conv2d(x, 16, 3)
+
+                F_score = slim.conv2d(x, 1, 1, activation_fn=tf.nn.sigmoid, normalizer_fn=None)
+                # 4 channel of axis aligned bbox and 1 channel rotation angle
+                geo_map = slim.conv2d(x, 4, 1, activation_fn=tf.nn.sigmoid, normalizer_fn=None) * 512
+                angle_map = (slim.conv2d(x, 1, 1, activation_fn=tf.nn.sigmoid, normalizer_fn=None) - 0.5) * np.pi/2 # angle is between [-45, 45]
+                F_geometry = tf.concat([geo_map, angle_map], axis=-1)
+    elif  FLAGS.decoder == 'Expand':
+        expand_kwargs = {
+        'expansion_size': expand_input(6),       
+        'split_expansion': 1,
+        'normalizer_fn': slim.batch_norm,
+        'residual': True
         }
-        with slim.arg_scope([slim.conv2d],
-                            activation_fn=tf.nn.relu,
-                            normalizer_fn=slim.batch_norm,
-                            normalizer_params=batch_norm_params,
-                            weights_regularizer=slim.l2_regularizer(weight_decay)):
-            f = [end_points['pool5'], end_points['pool4'],
-                 end_points['pool3'], end_points['pool2']]
-            for i in range(4):
-                print('Shape of f_{} {}'.format(i, f[i].shape))
-            g = [None, None, None, None]
-            h = [None, None, None, None]
-            num_outputs = [None, 128, 64, 32]
-            for i in range(4):
-                if i == 0:
-                    h[i] = f[i]
-                else:
-                    c1_1 = slim.conv2d(tf.concat([g[i-1], f[i]], axis=-1), num_outputs[i], 1)
-                    h[i] = slim.conv2d(c1_1, num_outputs[i], 3)
-                if i <= 2:
-                    g[i] = unpool(h[i])
-                else:
-                    g[i] = slim.conv2d(h[i], num_outputs[i], 3)
-                print('Shape of h_{} {}, g_{} {}'.format(i, h[i].shape, i, g[i].shape))
+        batch_norm_params = {'center': True, 'scale': True,'is_training': is_training}
 
-            # here we use a slightly different way for regression part,
-            # we first use a sigmoid to limit the regression range, and also
-            # this is do with the angle map
-            F_score = slim.conv2d(g[3], 1, 1, activation_fn=tf.nn.sigmoid, normalizer_fn=None)
-            # 4 channel of axis aligned bbox and 1 channel rotation angle
-            geo_map = slim.conv2d(g[3], 4, 1, activation_fn=tf.nn.sigmoid, normalizer_fn=None) * FLAGS.text_scale
-            angle_map = (slim.conv2d(g[3], 1, 1, activation_fn=tf.nn.sigmoid, normalizer_fn=None) - 0.5) * np.pi/2 # angle is between [-45, 45]
-            F_geometry = tf.concat([geo_map, angle_map], axis=-1)
+        with tf.variable_scope('decoder') :
+            with slim.arg_scope([slim.conv2d, slim.fully_connected, slim.separable_conv2d],
+                                        activation_fn=tf.nn.relu6,
+                                        normalizer_fn=slim.batch_norm,
+                                        normalizer_params=batch_norm_params,
+                                        weights_regularizer=slim.l2_regularizer(weight_decay)):
+                with slim.arg_scope([ops.expanded_conv],**expand_kwargs):
+                    with slim.arg_scope([slim.conv2d, slim.separable_conv2d],padding='SAME'):
+                        x = unpool(end_points['pool5'])
+                        x = tf.concat([x,end_points['pool4']],axis=-1)
+                        x = ops.expanded_conv(x, 48,depthwise_location='input',expansion_size= expand_input(1))
+                        print("up_4 shape : ",x.shape)
 
+                        x = unpool(x)
+                        x = tf.concat([x,end_points['pool3']],axis=-1)
+                        x = ops.expanded_conv(x, 24)
+                        print("up_3 shape : ",x.shape)
+
+                        x = unpool(x)
+                        x = tf.concat([x,end_points['pool2']],axis=-1)
+                        x = ops.expanded_conv(x, 16)
+                        print("up_2 shape : ",x.shape)
+
+                        x = slim.conv2d(x, 16, 3)
+                        x = slim.conv2d(x, 16, 3)
+
+                        F_score = slim.conv2d(x, 1, 1, activation_fn=tf.nn.sigmoid, normalizer_fn=None)
+                        # 4 channel of axis aligned bbox and 1 channel rotation angle
+                        geo_map = slim.conv2d(x, 4, 1, activation_fn=tf.nn.sigmoid, normalizer_fn=None) * 512
+                        angle_map = (slim.conv2d(x, 1, 1, activation_fn=tf.nn.sigmoid, normalizer_fn=None) - 0.5) * np.pi/2 # angle is between [-45, 45]
+                        F_geometry = tf.concat([geo_map, angle_map], axis=-1)
+    else :
+        print("original decoder")
+        with tf.variable_scope('feature_fusion', values=[end_points.values]):
+            batch_norm_params = {
+            'decay': 0.997,
+            'epsilon': 1e-5,
+            'scale': True,
+            'is_training': is_training
+            }
+            with slim.arg_scope([slim.conv2d],
+                                activation_fn=tf.nn.relu,
+                                normalizer_fn=slim.batch_norm,
+                                normalizer_params=batch_norm_params,
+                                weights_regularizer=slim.l2_regularizer(weight_decay)):
+                f = [end_points['pool5'], end_points['pool4'],
+                     end_points['pool3'], end_points['pool2']]
+                for i in range(4):
+                    print('Shape of f_{} {}'.format(i, f[i].shape))
+                g = [None, None, None, None]
+                h = [None, None, None, None]
+                num_outputs = [None, 128, 64, 32]
+                for i in range(4):
+                    if i == 0:
+                        h[i] = f[i]
+                    else:
+                        c1_1 = slim.conv2d(tf.concat([g[i-1], f[i]], axis=-1), num_outputs[i], 1)
+                        h[i] = slim.conv2d(c1_1, num_outputs[i], 3)
+                    if i <= 2:
+                        g[i] = unpool(h[i])
+                    else:
+                        g[i] = slim.conv2d(h[i], num_outputs[i], 3)
+                    print('Shape of h_{} {}, g_{} {}'.format(i, h[i].shape, i, g[i].shape))
+                # here we use a slightly different way for regression part,
+                # we first use a sigmoid to limit the regression range, and also
+                # this is do with the angle map
+                F_score = slim.conv2d(g[3], 1, 1, activation_fn=tf.nn.sigmoid, normalizer_fn=None)
+                # 4 channel of axis aligned bbox and 1 channel rotation angle
+                geo_map = slim.conv2d(g[3], 4, 1, activation_fn=tf.nn.sigmoid, normalizer_fn=None) * 512
+                angle_map = (slim.conv2d(g[3], 1, 1, activation_fn=tf.nn.sigmoid, normalizer_fn=None) - 0.5) * np.pi/2 # angle is between [-45, 45]
+                F_geometry = tf.concat([geo_map, angle_map], axis=-1)
+                              
     return F_score, F_geometry
 
 
