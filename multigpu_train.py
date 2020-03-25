@@ -2,10 +2,13 @@ import time
 import numpy as np
 import tensorflow as tf
 from tensorflow.contrib import slim
+import os 
+import multiprocessing
+
 
 tf.app.flags.DEFINE_integer('input_size', 512, '')
 tf.app.flags.DEFINE_integer('batch_size_per_gpu', 14, '')
-tf.app.flags.DEFINE_integer('num_readers', 16, '')
+#tf.app.flags.DEFINE_integer('num_readers', 16, '')
 tf.app.flags.DEFINE_float('learning_rate', 0.0001, '')
 tf.app.flags.DEFINE_integer('max_steps', 100000, '')
 tf.app.flags.DEFINE_float('moving_average_decay', 0.997, '')
@@ -16,6 +19,8 @@ tf.app.flags.DEFINE_integer('save_checkpoint_steps', 1000, '')
 tf.app.flags.DEFINE_integer('save_summary_steps', 100, '')
 tf.app.flags.DEFINE_string('pretrained_model_path',None, '')
 tf.app.flags.DEFINE_string('backbone', 'Mobilenet', 'what kind of backbone')
+
+
 #tf.app.flags.DEFINE_string('backbone_ckpt', '/home/minjun/Jupyter/ocr/EAST/trained_mobilnetv2/mobilenet_v2_1.0_224.ckpt', 'bacbkone directory')
 
 
@@ -26,6 +31,26 @@ import icdar
 FLAGS = tf.app.flags.FLAGS
 
 gpus = list(range(len(FLAGS.gpu_list.split(','))))
+
+if FLAGS.backbone == 'Mobilenet':
+    FLAGS.pretrained_model_path = '/home/minjun/Jupyter/ocr/EAST/trained_mobilnetv2/mobilenet_v2_1.0_224.ckpt'
+
+if FLAGS.dataset == 'icdar13':
+    if FLAGS.backbone == 'Mobilenet' : 
+        if FLAGS.decoder == 'original' :
+            FLAGS.pretrained_model_path = './tmp/east_icdar2017_mobilenet_v2_original/model.ckpt-99991'
+        elif FLAGS.decoder == 'Expand8' :
+            FLAGS.pretrained_model_path = './tmp/east_icdar2017_mobilenet_v2_expand8/model.ckpt-99991'
+        elif FLAGS.decoder == 'CRAFT' :
+            FLAGS.pretrained_model_path = './tmp/east_icdar2017_mobilenet_v2_CRAFT/model.ckpt-99991'
+            
+    elif FLAGS.backbone == 'Pvanet' : 
+        if FLAGS.decoder == 'original':
+            FLAGS.pretrained_model_path = './tmp/east_icdar2017_pvanet_original/model.ckpt-99991'
+
+            
+        
+    
 
 
 def tower_loss(images, score_maps, geo_maps, training_masks, reuse_variables=None):
@@ -183,7 +208,12 @@ def main(argv=None):
                 local_parameters*=i.value  #mutiplying dimension values
             total_parameters+=local_parameters
         print("-----params-----" , total_parameters)
-        data_generator = icdar.get_batch(num_workers=FLAGS.num_readers,
+        if os.name is 'nt':
+            workers = 0
+        else:
+            workers = multiprocessing.cpu_count()
+        print (" num of worker : ",workers)
+        data_generator = icdar.get_batch(num_workers=workers,
                                          input_size=FLAGS.input_size,
                                          batch_size=FLAGS.batch_size_per_gpu * len(gpus))
         

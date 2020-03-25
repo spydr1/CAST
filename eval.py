@@ -4,34 +4,64 @@ import math
 import os
 import numpy as np
 import tensorflow as tf
-
 import locality_aware_nms as nms_locality
 import lanms
 import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
+
 import zipfile
+from PIL import Image
+
+import sys 
+sys.path.append('/home/minjun/Jupyter/ocr/EAST/Analysis/')
+import count_flops 
+import random
+import colorsys
 
 tf.app.flags.DEFINE_string('test_data_path', '/tmp/ch4_test_images/images/', '')
 tf.app.flags.DEFINE_bool('gpu_use', True, '')
 tf.app.flags.DEFINE_string('gpu_list', '0', '')
 tf.app.flags.DEFINE_string('checkpoint_path', None, '')
-tf.app.flags.DEFINE_string('output_dir', './', '')
+tf.app.flags.DEFINE_string('output_dir', '.', '')
 tf.app.flags.DEFINE_bool('no_write_images', True, 'do not write images')
-tf.app.flags.DEFINE_string('dataset', 'icdar15', '')
+#tf.app.flags.DEFINE_string('dataset', 'icdar15', '')
 tf.app.flags.DEFINE_string('backbone', 'Mobilenet', 'what kind of backbone')
 tf.app.flags.DEFINE_integer('weight_list', 1, '')
+tf.app.flags.DEFINE_integer('max_side_len', None, '')
 
+tf.app.flags.DEFINE_float('score_map_thresh', 0.8, '')
+tf.app.flags.DEFINE_float('box_thresh', 0.1, '')
+tf.app.flags.DEFINE_float('nms_thres', 0.2, '')
+tf.app.flags.DEFINE_bool('summary', False, '')
 
 import model
 from icdar import restore_rectangle
+import re
 
 FLAGS = tf.app.flags.FLAGS
+
+score_map_thresh=FLAGS.score_map_thresh
+box_thresh=FLAGS.box_thresh
+nms_thres=FLAGS.nms_thres
+def random_colors(N, bright=False):
+    """
+    Generate random colors.
+    To get visually distinct colors, generate them in HSV space then
+    convert to RGB.
+    """
+    brightness = 1.0 if bright else 0.7
+    hsv = [(i / N, 1, brightness) for i in range(N)]
+    colors = list(map(lambda c: colorsys.hsv_to_rgb(*c), hsv))
+    random.shuffle(colors)
+    return colors
+
 def get_images(test_data_path):
     '''
     find image files in test data path
     :return: list of files found
     '''
     files = []
-    exts = ['jpg', 'png', 'jpeg', 'JPG']
+    exts = ['jpg', 'png', 'jpeg', 'JPG','gif']
     for parent, dirnames, filenames in os.walk(test_data_path):
         for filename in filenames:
             for ext in exts:
@@ -42,7 +72,18 @@ def get_images(test_data_path):
     return files
 
 
-def resize_image(im, max_side_len=1280):
+if FLAGS.dataset == 'icdar15':
+    FLAGS.max_side_len = 1280
+    print("max size : ",FLAGS.max_side_len)
+elif FLAGS.dataset == 'icdar17_mlt':
+    FLAGS.max_side_len = 2400
+    print("max size : ",FLAGS.max_side_len)
+elif FLAGS.dataset == 'icdar13':
+    FLAGS.max_side_len = 256
+    print("max size : ",FLAGS.max_side_len)
+
+
+def resize_image(im, max_side_len=FLAGS.max_side_len):
     '''
     resize image to a size multiple of 32 which is required by the network
     :param im: the resized image
@@ -58,7 +99,7 @@ def resize_image(im, max_side_len=1280):
     if max(resize_h, resize_w) > max_side_len:
         ratio = float(max_side_len) / resize_h if resize_h > resize_w else float(max_side_len) / resize_w
     else:
-        ratio = 1.
+        ratio = max_side_len/max(resize_h, resize_w)
     resize_h = int(resize_h * ratio)
     resize_w = int(resize_w * ratio)
 
@@ -74,7 +115,8 @@ def resize_image(im, max_side_len=1280):
     return im, (ratio_h, ratio_w)
 
 
-def detect(score_map, geo_map, timer, score_map_thresh=0.8, box_thresh=0.1, nms_thres=0.2):
+
+def detect(score_map, geo_map, timer, score_map_thresh=score_map_thresh, box_thresh=box_thresh, nms_thres=nms_thres):
     '''
     restore text boxes from score map and geo map
     :param score_map:
@@ -118,41 +160,6 @@ def detect(score_map, geo_map, timer, score_map_thresh=0.8, box_thresh=0.1, nms_
 
     return boxes, timer
 
-#(pred,rawshape,window=None,thres=0.1,thres_area=30):
-def simple_detect(score_map,rawsahpe ,thres=0.5,thres_area= 30):
-    '''
-    restore text boxes from score map and geo map
-    :param score_map:
-    :param geo_map:
-    :param timer:
-    :param score_map_thresh: threshhold for score map
-    :param box_thresh: threshhold for boxes
-    :param nms_thres: threshold for nms
-    :return:
-    '''
-    ret, binimage = cv2.threshold(score_map,thres,1,0)
-
-    nlabels, labels, stats, centroids = cv2.connectedComponentsWithStats(binimage)
-    for i in range(1,nlabels):
-        area = stats[i, cv2.CC_STAT_AREA]
-        if area > thres_area : 
-            
-            center_x = int(centroids[i, 0])
-            center_y = int(centroids[i, 1]) 
-            left = stats[i, cv2.CC_STAT_LEFT]
-            top = stats[i, cv2.CC_STAT_TOP]
-            width = int(stats[i, cv2.CC_STAT_WIDTH]*1.2)
-            height = int(stats[i, cv2.CC_STAT_HEIGHT]*1.2)
-            
-            y1 = max(min((center_y-height/2)/pred.shape[0],1),0)
-            y2 = max(min((center_y+height/2)/pred.shape[0],1),0)
-            x1 = max(min((center_x-width/2)/pred.shape[1],1),0)
-            x2 = max(min((center_x+width/2)/pred.shape[1],1),0)
-
-            bbox.append([int(x1*rawshape[1]),int(y1*rawshape[0]),int(x2*rawshape[1]),int(y2*rawshape[0])])
-
-    return boxes
-
 def sort_poly(p):
     min_axis = np.argmin(np.sum(p, axis=1))
     p = p[[min_axis, (min_axis+1)%4, (min_axis+2)%4, (min_axis+3)%4]]
@@ -183,21 +190,19 @@ def main(argv=None):
 
         variable_averages = tf.train.ExponentialMovingAverage(0.997, global_step)
         saver = tf.train.Saver(variable_averages.variables_to_restore())
-        total_parameters=0
-        for variable in tf.trainable_variables():  
-            local_parameters=1
-            shape = variable.get_shape()  #getting shape of a variable
-            for i in shape:
-                local_parameters*=i.value  #mutiplying dimension values
-            total_parameters+=local_parameters
-        print("-----params-----" , total_parameters)      
+        if FLAGS.summary == True : 
+            img_dir='/home/minjun/Jupyter/data/ocr/2017_MLT/test/ts_img_00001.jpg'
+            im = cv2.imread(img_dir)[:, :, ::-1]
+            im_resized, (ratio_h, ratio_w) = resize_image(im)
+
         
-           
+
 
         with tf.Session() as sess:
             #flops = tf.profiler.profile(sess.graph, options = tf.profiler.ProfileOptionBuilder.float_operation())
             #print('FLOP before freezing', flops.total_float_ops)
             for w in range(1,FLAGS.weight_list+1):
+             
                 if FLAGS.dataset == 'icdar15':
                     test_data_path = '/home/minjun/Jupyter/data/ocr/2015/test/'
                     basedir = FLAGS.output_dir+'/output/tmp15/'
@@ -205,14 +210,30 @@ def main(argv=None):
                     imgfolder = FLAGS.output_dir+'/output/res_img_15/'
 
                 elif FLAGS.dataset == 'icdar13':
+                    print('icdar13')
                     test_data_path = '/home/minjun/Jupyter/data/ocr/2013/Text_Localization/test/'
                     basedir = FLAGS.output_dir+'/output/tmp13/'
                     resfolder = FLAGS.output_dir+'/output/res13/'
                     imgfolder = FLAGS.output_dir+'/output/res_img_13/'
+                elif FLAGS.dataset == 'icdar17_mlt':
+                    print('icdar17_mlt')
+                    test_data_path = '/home/minjun/Jupyter/data/ocr/2017_MLT/test/'
+                    basedir = FLAGS.output_dir+'/output/tmp17_mlt/'
+                    resfolder = FLAGS.output_dir+'/output/res17_mlt/'
+                    imgfolder = FLAGS.output_dir+'/output/res_img_17_mlt/'
+                else : 
+                    test_data_path = FLAGS.test_data_path
+                    basedir = './output/tmp/'
+                    resfolder = './output/res/'
+                    imgfolder = './output/img/'
+                    
+                if not os.path.isdir(basedir):
+                    os.mkdir(basedir)
+                    os.mkdir(resfolder)
+                    os.mkdir(imgfolder)
                     
                 if os.listdir(resfolder) is not None :
                     resname =[int(name.split('.')[0]) for name in os.listdir(resfolder) if '.zip' in name]
-                    print(resname)
                     resname.sort()
                     if len(resname)>0:
                         print("last file :", resname[-1])
@@ -233,9 +254,22 @@ def main(argv=None):
 
                 im_fn_list = get_images(test_data_path)
                 t = time.time()
+                net_t = 0
                 for k,im_fn in enumerate(im_fn_list):
                     print("Test image {:d}/{:d}".format(k+1, len(im_fn_list)), end='\r')
-                    im = cv2.imread(im_fn)[:, :, ::-1]
+                    if im_fn.endswith('gif') : 
+                        gif = cv2.VideoCapture(im_fn)
+                        ret,frame = gif.read() 
+                        im = Image.fromarray(frame)
+                        im = im.convert('RGB')
+                        pixels = list(im.getdata())
+                        width, height = im.size
+                        pixels = [pixels[i * width:(i + 1) * width] for i in range(height)]
+                        im = np.array(pixels, dtype=np.uint8)
+                    else : 
+                        im = cv2.imread(im_fn)[:, :, ::-1]
+                    
+                        
                     start_time = time.time()
                     im_resized, (ratio_h, ratio_w) = resize_image(im)
                     #print("image size : ",np.shape(im_resized))
@@ -245,39 +279,37 @@ def main(argv=None):
                     score, geometry = sess.run([f_score, f_geometry], feed_dict={input_images: [im_resized]})
                     #print(np.shape(score),np.shape(geometry))
                     timer['net'] = time.time() - start
+                    net_t += timer['net']
 
                     boxes, timer = detect(score_map=score, geo_map=geometry, timer=timer)
 
 
 
                     if boxes is not None:
+                        score = boxes[:,8]
                         boxes = boxes[:, :8].reshape((-1, 4, 2))
                         boxes[:, :, 0] /= ratio_w
                         boxes[:, :, 1] /= ratio_h
 
                     duration = time.time() - start_time
-                    #print('[timing] {}'.format(duration))
 
                     # save to file
                     timer['post_processing'] = time.time()
-                    if boxes is not None:
-                        res_file = os.path.join(basedir,'res_{}.txt'.format(os.path.basename(im_fn).split('.')[0]))
-                        with open(res_file, 'w') as f:
+                    s = os.path.basename(im_fn).split('.')[0]
+                    s = re.findall('\d+', s)[0]
+                    if FLAGS.dataset == 'icdar17_mlt' or FLAGS.dataset =='icdar15' or FLAGS.dataset == 'icdar13' :
+                        res_file = os.path.join(basedir,'res_img_{}.txt'.format(s))
 
-                            if FLAGS.dataset == 'icdar15':
-                                for box in boxes:
-                                    # to avoid submitting errors
-                                    box = sort_poly(box.astype(np.int32))
-                                    if np.linalg.norm(box[0] - box[1]) < 5 or np.linalg.norm(box[3]-box[0]) < 5:
-                                        continue
-                                    f.write('{},{},{},{},{},{},{},{}\r\n'.format(
-                                        box[0, 0], box[0, 1], box[1, 0], box[1, 1], box[2, 0], box[2, 1], box[3, 0], box[3, 1],
-                                    ))
-                                    cv2.polylines(im[:, :, ::-1], [box.astype(np.int32).reshape((-1, 1, 2))], True, color=(255, 255, 0), thickness=1)
-                                if boxes is None : 
-                                    print(res_file)
-                            elif FLAGS.dataset == 'icdar13':
-                                for box in boxes:
+                    else :
+                        res_file = os.path.join(basedir,'res_{}.txt'.format(s))
+                    
+                    with open(res_file, 'w') as f:
+                        if boxes is not None:
+                            colors = random_colors(len(boxes))
+                            if FLAGS.dataset == 'icdar13':
+                                for i,box in enumerate(boxes):
+                                    #color = np.random.randint(256, size=3)
+                                    color = colors[i]
                                     box = sort_poly(box.astype(np.int32))
                                     if np.linalg.norm(box[0] - box[1]) < 5 or np.linalg.norm(box[3]-box[0]) < 5:
                                         continue
@@ -286,21 +318,57 @@ def main(argv=None):
                                     x_max = max(box[0, 0], box[1, 0], box[2, 0], box[3, 0])
                                     x_min = min(box[0, 0], box[1, 0], box[2, 0], box[3, 0])
                                     f.write('{},{},{},{} \r\n'.format(
-                                        x_min,y_min,x_max,y_max,
+                                        x_min,y_min,x_max,y_max
                                     ))
-                                    cv2.polylines(im[:, :, ::-1], [box.astype(np.int32).reshape((-1, 1, 2))], True, color=(255, 255, 0), thickness=1)
+                                    if not FLAGS.no_write_images:
+                                        cv2.polylines(im[:, :, ::-1], [box.astype(np.int32).reshape((-1, 1, 2))], True, color=color, thickness=2)
                                     if boxes is None : 
-                                        print(res_file)
-                        timer['post_processing'] = time.time()-timer['post_processing']
-                        #print('{} : net {:.0f}ms, restore {:.0f}ms, nms {:.0f}ms post processing : {:.0f}ms'.format(
-                        #im_fn, timer['net']*1000, timer['restore']*1000, timer['nms']*1000,timer['post_processing']*1000))
+                                        print(res_file, "box is none" )
+                            elif FLAGS.dataset == 'icdar15': 
+                                for i,box in enumerate(boxes):
+                                    color = (np.random.randint(0,255), np.random.randint(0,255), np.random.randint(0,255))
+                                    color = (0, 255, 255)
+                                    # to avoid submitting errors
+                                    #color = colors[i]
+                                    #color = np.random.rand(3)
+                                    box = sort_poly(box.astype(np.int32))
+                                    if np.linalg.norm(box[0] - box[1]) < 5 or np.linalg.norm(box[3]-box[0]) < 5:
+                                        continue
+                                    f.write('{},{},{},{},{},{},{},{} \r\n'.format(
+                                        box[0, 0], box[0, 1], box[1, 0], box[1, 1], box[2, 0], box[2, 1], box[3, 0], box[3, 1]
+                                    ))
+                                    if not FLAGS.no_write_images:
+                                        try : cv2.polylines(im[:, :, ::-1], [box.astype(np.int32).reshape((-1, 1, 2))], True, color=color, thickness=2)
+                                        except : print("error is raised ",res_file )
+                                if boxes is None : 
+                                    print(res_file, "box is none" )
+                            else : 
+                                for i,box in enumerate(boxes):
+                                    # to avoid submitting errors
+                                    color = np.random.rand(3)
+                                    #color = colors[i]
+                                    box = sort_poly(box.astype(np.int32))
+                                    if np.linalg.norm(box[0] - box[1]) < 5 or np.linalg.norm(box[3]-box[0]) < 5:
+                                        continue
+                                    f.write('{},{},{},{},{},{},{},{}, {} \r\n'.format(
+                                        box[0, 0], box[0, 1], box[1, 0], box[1, 1], box[2, 0], box[2, 1], box[3, 0], box[3, 1],score[i]
+                                    ))
+                                    if not FLAGS.no_write_images:
+                                        try : cv2.polylines(im[:, :, ::-1], [box.astype(np.int32).reshape((-1, 1, 2))], True, color=color, thickness=2)
+                                        except : print("error is raised ",res_file )
+                                if boxes is None : 
+                                    print(res_file, "box is none" )
+                            timer['post_processing'] = time.time()-timer['post_processing']
+                            #print('{} : net {:.0f}ms, restore {:.0f}ms, nms {:.0f}ms post processing : {:.0f}ms'.format(
+                            #im_fn, timer['net']*1000, timer['restore']*1000, timer['nms']*1000,timer['post_processing']*1000))
 
 
-                    fantasy_zip = zipfile.ZipFile(os.path.join(resfolder,str(resname))+'.zip', 'w')               
-                    if not FLAGS.no_write_images:
-                        img_path = os.path.join(imgfolder, os.path.basename(im_fn))
-                        cv2.imwrite(img_path, im[:, :, ::-1])
-                print('time: ' , time.time() - t )
+                        fantasy_zip = zipfile.ZipFile(os.path.join(resfolder,str(resname))+'.zip', 'w')               
+                        if not FLAGS.no_write_images:
+                            img_path = os.path.join(imgfolder, os.path.basename(im_fn))
+                            cv2.imwrite(img_path, im[:, :, ::-1])
+                cur_t=time.time()        
+                print('time: ' , cur_t - t, 'net time : ', net_t)
                 for folder, subfolders, files in os.walk(basedir):
                     for file in files:
                         if file.endswith('.txt'):

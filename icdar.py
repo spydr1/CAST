@@ -10,11 +10,13 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as Patches
 from shapely.geometry import Polygon
 
+
+
 import tensorflow as tf
 
 from data_util import GeneratorEnqueuer
 
-tf.app.flags.DEFINE_string('training_data_path', '/data/ocr/2015/train',
+tf.app.flags.DEFINE_string('training_data_path', '/home/minjun/Jupyter/data/ocr/2015/train',
                            'training dataset to use')
 tf.app.flags.DEFINE_integer('max_image_large_side', 1280,
                             'max image size of training')
@@ -28,19 +30,10 @@ tf.app.flags.DEFINE_float('min_crop_side_ratio', 0.1,
                           'min length of min(H, W')
 tf.app.flags.DEFINE_string('geometry', 'RBOX',
                            'which geometry to generate, RBOX or QUAD')
+tf.app.flags.DEFINE_string('dataset', 'icdar15', '')
 
 
 FLAGS = tf.app.flags.FLAGS
-
-class A (object):
-    training_data_path = '/home/minjun/Jupyter/data/ocr/2015/train'
-    max_image_large_side = 1280
-    max_text_size = 800
-    min_text_size = 10
-    min_crop_side_ratio = 0.1
-    geometry = 'RBOX'
-    
-FLAGS = A()
 
 def get_images():
     files = []
@@ -63,16 +56,24 @@ def load_annoataion(p):
     with open(p, 'r') as f:
         reader = csv.reader(f)
         for line in reader:
-            label = line[-1]
+            
             # strip BOM. \ufeff for python3,  \xef\xbb\bf for python2
-            line = [i.strip('\ufeff').strip('\xef\xbb\xbf') for i in line]
-
-            x1, y1, x2, y2, x3, y3, x4, y4 = list(map(float, line[:8]))
-            text_polys.append([[x1, y1], [x2, y2], [x3, y3], [x4, y4]])
-            if label == '*' or label == '###':
-                text_tags.append(True)
-            else:
+            if FLAGS.dataset=='icdar13':
+                line = list(map(float,line[0].split()[:4]))
+                x1, y1, x2, y2 = line
+                
+                text_polys.append([[x1, y1], [x2, y1], [x2, y2], [x1, y2]]) 
                 text_tags.append(False)
+
+            else : 
+                label = line[-1]
+                line = [i.strip('\ufeff').strip('\xef\xbb\xbf') for i in line]
+                x1, y1, x2, y2, x3, y3, x4, y4 = list(map(float, line[:8]))
+                text_polys.append([[x1, y1], [x2, y2], [x3, y3], [x4, y4]])
+                if label == '*' or label == '###':
+                    text_tags.append(True)
+                else:
+                    text_tags.append(False)
         return np.array(text_polys, dtype=np.float32), np.array(text_tags, dtype=np.bool)
 
 
@@ -104,9 +105,10 @@ def check_and_validate_polys(polys, tags, xxx_todo_changeme):
         return polys
     polys[:, :, 0] = np.clip(polys[:, :, 0], 0, w-1)
     polys[:, :, 1] = np.clip(polys[:, :, 1], 0, h-1)
-
+    
     validated_polys = []
     validated_tags = []
+    
     for poly, tag in zip(polys, tags):
         p_area = polygon_area(poly)
         if abs(p_area) < 1:
@@ -400,8 +402,8 @@ def restore_rectangle_rbox(origin, geometry):
     origin_0 = origin[angle >= 0]
     d_0 = d[angle >= 0]
     angle_0 = angle[angle >= 0]
-    if origin_0.shape[0] > 0:
-        p = np.array([np.zeros(d_0.shape[0]), -d_0[:, 0] - d_0[:, 2],
+    if origin_0.shape[0] > 0: # N, height1, widht1, height, widht, N , N , N ,width, height 
+        p = np.array([np.zeros(d_0.shape[0]), -d_0[:, 0] - d_0[:, 2], 
                       d_0[:, 1] + d_0[:, 3], -d_0[:, 0] - d_0[:, 2],
                       d_0[:, 1] + d_0[:, 3], np.zeros(d_0.shape[0]),
                       np.zeros(d_0.shape[0]), np.zeros(d_0.shape[0]),
@@ -643,6 +645,7 @@ def generator(input_size=512, batch_size=32,
                     geo_map = np.zeros((input_size, input_size, geo_map_channels), dtype=np.float32)
                     training_mask = np.ones((input_size, input_size), dtype=np.uint8)
                 else:
+                    
                     im, text_polys, text_tags = crop_area(im, text_polys, text_tags, crop_background=False)
                     if text_polys.shape[0] == 0:
                         continue
@@ -732,7 +735,7 @@ def get_batch(num_workers, **kwargs):
     try:
         enqueuer = GeneratorEnqueuer(generator(**kwargs), use_multiprocessing=True)
         print('Generator use 10 batches for buffering, this may take a while, you can tune this yourself.')
-        enqueuer.start(max_queue_size=10, workers=num_workers)
+        enqueuer.start(max_queue_size=20, workers=num_workers)
         generator_output = None
         while True:
             while enqueuer.is_running():
